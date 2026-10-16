@@ -32,6 +32,9 @@ type MetaAggregator struct {
 	MetaLogBuffer  *log_buffer.LogBuffer
 	peerChans      map[pb.ServerAddress]chan struct{}
 	peerChansLock  sync.Mutex
+	stopping       bool
+	workers        sync.WaitGroup
+	stopOnce       sync.Once
 	// peerWatermarks tracks, per subscribed peer (self included), the newest
 	// timestamp received on that peer's stream (event or idle heartbeat).
 	// The minimum is a delivery low-watermark: MetaLogBuffer is complete up
@@ -87,6 +90,9 @@ func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate, star
 	ma.peerChansLock.Lock()
 	defer ma.peerChansLock.Unlock()
 
+	if ma.stopping {
+		return
+	}
 	address := pb.ServerAddress(update.Address)
 	if update.IsAdd {
 		// the peer is already followed, restarting would only lose the events
@@ -102,7 +108,11 @@ func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate, star
 		// Account for the peer before its stream signals; keep prior values
 		// on reconnect.
 		ma.initPeerWatermark(address)
-		go ma.loopSubscribeToOneFiler(ma.filer, ma.self, address, startFrom, stopChan)
+		ma.workers.Add(1)
+		go func() {
+			defer ma.workers.Done()
+			ma.loopSubscribeToOneFiler(ma.filer, ma.self, address, startFrom, stopChan)
+		}()
 	} else {
 		if prevChan, found := ma.peerChans[address]; found {
 			close(prevChan)
@@ -112,6 +122,21 @@ func (ma *MetaAggregator) OnPeerUpdate(update *master_pb.ClusterNodeUpdate, star
 		// advance past a flapping peer's unflushed events (see peerRemovedAtNs).
 		ma.markPeerWatermarkRemoved(address)
 	}
+}
+
+// StopSubscriptions fences peer updates, cancels every owned stream (including
+// self), and joins their callbacks before the filer drains RPCs or closes its store.
+func (ma *MetaAggregator) StopSubscriptions() {
+	ma.stopOnce.Do(func() {
+		ma.peerChansLock.Lock()
+		ma.stopping = true
+		for peer, stop := range ma.peerChans {
+			close(stop)
+			delete(ma.peerChans, peer)
+		}
+		ma.peerChansLock.Unlock()
+		ma.workers.Wait()
+	})
 }
 
 // peerWatermarkRemovalGrace is how long a removed peer keeps participating
@@ -332,6 +357,11 @@ func (ma *MetaAggregator) HasPeer(address pb.ServerAddress) bool {
 func (ma *MetaAggregator) loopSubscribeToOneFiler(f *Filer, self pb.ServerAddress, peer pb.ServerAddress, startFrom time.Time, stopChan chan struct{}) {
 	lastTsNs := startFrom.UnixNano()
 	for {
+		select {
+		case <-stopChan:
+			return
+		default:
+		}
 		glog.V(0).Infof("loopSubscribeToOneFiler read %s start from %v %d", peer, time.Unix(0, lastTsNs), lastTsNs)
 		nextLastTsNs, err := ma.doSubscribeToOneFiler(f, self, peer, lastTsNs, stopChan)
 
@@ -353,11 +383,34 @@ func (ma *MetaAggregator) loopSubscribeToOneFiler(f *Filer, self pb.ServerAddres
 		if lastTsNs < nextLastTsNs {
 			lastTsNs = nextLastTsNs
 		}
-		time.Sleep(1733 * time.Millisecond)
+		timer := time.NewTimer(1733 * time.Millisecond)
+		select {
+		case <-stopChan:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
 }
 
 func (ma *MetaAggregator) doSubscribeToOneFiler(f *Filer, self pb.ServerAddress, peer pb.ServerAddress, startFrom int64, stopChan <-chan struct{}) (int64, error) {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-stopChan:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer func() { cancel(); <-watcherDone }()
+	select {
+	case <-stopChan:
+		return startFrom, context.Canceled
+	default:
+	}
 
 	/*
 		Each filer reads the "filer.store.id", which is the store's signature when filer starts.
@@ -373,7 +426,7 @@ func (ma *MetaAggregator) doSubscribeToOneFiler(f *Filer, self pb.ServerAddress,
 	lastPersistTime := time.Now()
 	lastTsNs := startFrom
 
-	peerSignature, err := ma.readFilerStoreSignature(peer)
+	peerSignature, err := ma.readFilerStoreSignature(ctx, peer)
 	if err != nil {
 		return lastTsNs, fmt.Errorf("connecting to peer filer %s: %v", peer, err)
 	}
@@ -393,7 +446,7 @@ func (ma *MetaAggregator) doSubscribeToOneFiler(f *Filer, self pb.ServerAddress,
 			// different concept and can be set to arbitrary values.
 			preTraverseTime := time.Now()
 			glog.V(0).Infof("no previous offset for peer %s, starting full metadata sync", peer)
-			if traverseErr := ma.traversePeerMetadata(f, peer); traverseErr != nil {
+			if traverseErr := ma.traversePeerMetadata(ctx, f, peer); traverseErr != nil {
 				return lastTsNs, fmt.Errorf("initial metadata sync from %s: %v", peer, traverseErr)
 			}
 			lastTsNs = preTraverseTime.Add(-time.Minute).UnixNano()
@@ -461,17 +514,6 @@ func (ma *MetaAggregator) doSubscribeToOneFiler(f *Filer, self pb.ServerAddress,
 
 	glog.V(0).Infof("subscribing remote %s meta change: %v, clientId:%d", peer, time.Unix(0, lastTsNs), ma.filer.UniqueFilerId)
 	err = pb.WithFilerClient(true, 0, peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		// Stop the stream promptly on removal; the blocking Recv below would
-		// otherwise only notice when the stream errors on its own.
-		go func() {
-			select {
-			case <-stopChan:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
 		atomic.AddInt32(&ma.filer.UniqueFilerEpoch, 1)
 		// Construct a log file reader that reads chunks via the peer filer's LookupVolume.
 		lookupFn := LookupFn(filerClient{client})
@@ -597,10 +639,8 @@ func replicateMetadataChange(store FilerStore, peer pb.ServerAddress, event *fil
 // traversePeerMetadata does a full BFS traversal of a peer filer's metadata
 // and inserts all entries into the local store. This is used when a filer
 // connects to a peer for the first time and needs to bootstrap pre-existing data.
-func (ma *MetaAggregator) traversePeerMetadata(f *Filer, peer pb.ServerAddress) error {
+func (ma *MetaAggregator) traversePeerMetadata(ctx context.Context, f *Filer, peer pb.ServerAddress) error {
 	return pb.WithFilerClient(true, 0, peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		stream, err := client.TraverseBfsMetadata(ctx, &filer_pb.TraverseBfsMetadataRequest{
 			Directory:        "/",
 			ExcludedPrefixes: []string{SystemLogDir},
@@ -647,9 +687,9 @@ func (ma *MetaAggregator) traversePeerMetadata(f *Filer, peer pb.ServerAddress) 
 	})
 }
 
-func (ma *MetaAggregator) readFilerStoreSignature(peer pb.ServerAddress) (sig int32, err error) {
+func (ma *MetaAggregator) readFilerStoreSignature(ctx context.Context, peer pb.ServerAddress) (sig int32, err error) {
 	err = pb.WithFilerClient(false, 0, peer, ma.grpcDialOption, func(client filer_pb.SeaweedFilerClient) error {
-		resp, err := client.GetFilerConfiguration(context.Background(), &filer_pb.GetFilerConfigurationRequest{})
+		resp, err := client.GetFilerConfiguration(ctx, &filer_pb.GetFilerConfigurationRequest{})
 		if err != nil {
 			return err
 		}

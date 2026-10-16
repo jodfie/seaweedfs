@@ -510,6 +510,13 @@ func (fo *FilerOptions) startFiler() {
 		}
 	}
 
+	beforeShutdown := func() {
+		if fo.beforeShutdown != nil {
+			fo.beforeShutdown()
+		}
+		fs.StopMetadataAggregation()
+	}
+
 	var socketServer *http.Server
 	if runtime.GOOS != "windows" {
 		localSocket := *fo.localSocket
@@ -577,7 +584,7 @@ func (fo *FilerOptions) startFiler() {
 		}
 		httpS := newHttpServer(defaultHandler, tlsConfig)
 		httpServers = append(httpServers, httpS)
-		shutdown := newFilerShutdownAfter(fo.beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
+		shutdown := newFilerShutdownAfter(beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
 
 		grace.OnInterrupt(shutdown)
 
@@ -606,7 +613,7 @@ func (fo *FilerOptions) startFiler() {
 		}
 		httpS := newHttpServer(defaultHandler, nil)
 		httpServers = append(httpServers, httpS)
-		shutdown := newFilerShutdownAfter(fo.beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
+		shutdown := newFilerShutdownAfter(beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
 
 		grace.OnInterrupt(shutdown)
 

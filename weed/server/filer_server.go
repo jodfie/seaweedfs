@@ -366,6 +366,14 @@ func (fs *FilerServer) Shutdown() {
 	fs.filer.Shutdown()
 }
 
+// StopMetadataAggregation retires internal peer streams before gRPC drain.
+// The log buffers and store stay open until request draining finishes.
+func (fs *FilerServer) StopMetadataAggregation() {
+	if fs.filer.MetaAggregator != nil {
+		fs.filer.MetaAggregator.StopSubscriptions()
+	}
+}
+
 func (fs *FilerServer) Reload() {
 	glog.V(0).Infoln("Reload filer server...")
 

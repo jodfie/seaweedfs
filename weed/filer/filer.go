@@ -739,6 +739,9 @@ func (f *Filer) IsDirectoryEmpty(ctx context.Context, dirPath util.FullPath) (bo
 }
 
 func (f *Filer) Shutdown() {
+	if f.MetaAggregator != nil {
+		f.MetaAggregator.StopSubscriptions()
+	}
 	close(f.deletionQuit)
 	if f.EmptyFolderCleaner != nil {
 		f.EmptyFolderCleaner.Stop()
@@ -746,6 +749,10 @@ func (f *Filer) Shutdown() {
 	f.LocalMetaLogBuffer.ShutdownLogBuffer()
 	// The final metadata-log flush still needs the store to append its entry.
 	f.LocalMetaLogBuffer.WaitForShutdown()
+	if f.MetaAggregator != nil {
+		f.MetaAggregator.MetaLogBuffer.ShutdownLogBuffer()
+		f.MetaAggregator.MetaLogBuffer.WaitForShutdown()
+	}
 	f.Store.Shutdown()
 }
 
