@@ -93,6 +93,8 @@ type FilerOptions struct {
 	// HTTP/gRPC servers once the ctx is cancelled. Used by integration tests
 	// and by weed mini; nil for standalone weed filer.
 	shutdownCtx context.Context
+	// beforeShutdown joins dependent services before filer request admission closes.
+	beforeShutdown func()
 	// gracefulStopTimeout caps how long startFiler waits for gRPC graceful
 	// stop before forcing the server to stop. Zero means the default of 15s.
 	gracefulStopTimeout time.Duration
@@ -575,7 +577,7 @@ func (fo *FilerOptions) startFiler() {
 		}
 		httpS := newHttpServer(defaultHandler, tlsConfig)
 		httpServers = append(httpServers, httpS)
-		shutdown := newFilerShutdown(stopGrpcServer, fs.Shutdown, httpServers...)
+		shutdown := newFilerShutdownAfter(fo.beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
 
 		grace.OnInterrupt(shutdown)
 
@@ -604,7 +606,7 @@ func (fo *FilerOptions) startFiler() {
 		}
 		httpS := newHttpServer(defaultHandler, nil)
 		httpServers = append(httpServers, httpS)
-		shutdown := newFilerShutdown(stopGrpcServer, fs.Shutdown, httpServers...)
+		shutdown := newFilerShutdownAfter(fo.beforeShutdown, stopGrpcServer, fs.Shutdown, httpServers...)
 
 		grace.OnInterrupt(shutdown)
 
@@ -625,7 +627,14 @@ func (fo *FilerOptions) startFiler() {
 
 // newFilerShutdown joins shutdown callers while gRPC and HTTP drain concurrently.
 func newFilerShutdown(stopGrpc, shutdownFiler func(), httpServers ...*http.Server) func() {
+	return newFilerShutdownAfter(nil, stopGrpc, shutdownFiler, httpServers...)
+}
+
+func newFilerShutdownAfter(beforeShutdown, stopGrpc, shutdownFiler func(), httpServers ...*http.Server) func() {
 	return sync.OnceFunc(func() {
+		if beforeShutdown != nil {
+			beforeShutdown()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		var drained sync.WaitGroup

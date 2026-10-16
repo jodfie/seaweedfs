@@ -129,6 +129,9 @@ type S3ApiServer struct {
 
 	versionsHealQueue      *versionsHealQueue
 	versionsReconcilerStop func()
+	metadataFollowCancel   context.CancelFunc
+	metadataFollowDone     chan struct{}
+	shutdownOnce           sync.Once
 }
 
 type objectWriteLock interface {
@@ -501,15 +504,21 @@ func NewS3ApiServerWithStore(router *mux.Router, option *S3ApiServerOption, expl
 
 	s3ApiServer.registerRouter(router)
 
-	go s3ApiServer.subscribeMetaEvents("s3", startTsNs, filer.DirectoryEtcRoot, []string{
-		option.BucketsPath,
-		filer.IamConfigDirectory,
-		filer.IamConfigDirectory + "/identities",
-		filer.IamConfigDirectory + "/policies",
-		filer.IamConfigDirectory + "/service_accounts",
-		filer.IamConfigDirectory + "/groups",
-		filer.IamConfigDirectory + "/oidc-providers",
-	})
+	metadataCtx, metadataCancel := context.WithCancel(context.Background())
+	s3ApiServer.metadataFollowCancel = metadataCancel
+	s3ApiServer.metadataFollowDone = make(chan struct{})
+	go func() {
+		defer close(s3ApiServer.metadataFollowDone)
+		s3ApiServer.subscribeMetaEvents(metadataCtx, "s3", startTsNs, filer.DirectoryEtcRoot, []string{
+			option.BucketsPath,
+			filer.IamConfigDirectory,
+			filer.IamConfigDirectory + "/identities",
+			filer.IamConfigDirectory + "/policies",
+			filer.IamConfigDirectory + "/service_accounts",
+			filer.IamConfigDirectory + "/groups",
+			filer.IamConfigDirectory + "/oidc-providers",
+		})
+	}()
 
 	// Start bucket size metrics collection in background
 	go s3ApiServer.startBucketSizeMetricsLoop(context.Background())
@@ -541,12 +550,20 @@ func (s3a *S3ApiServer) applyTrustedProxies(v util.Configuration) {
 }
 
 func (s3a *S3ApiServer) Shutdown() {
-	if s3a.versionsReconcilerStop != nil {
-		s3a.versionsReconcilerStop()
-	}
-	if s3a.iam != nil {
-		s3a.iam.Shutdown()
-	}
+	s3a.shutdownOnce.Do(func() {
+		if s3a.metadataFollowCancel != nil {
+			s3a.metadataFollowCancel()
+		}
+		if s3a.metadataFollowDone != nil {
+			<-s3a.metadataFollowDone
+		}
+		if s3a.versionsReconcilerStop != nil {
+			s3a.versionsReconcilerStop()
+		}
+		if s3a.iam != nil {
+			s3a.iam.Shutdown()
+		}
+	})
 }
 
 // getFilerAddress returns the current active filer address

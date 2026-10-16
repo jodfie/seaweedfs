@@ -59,7 +59,24 @@ func FollowMetadata(filerAddress ServerAddress, grpcDialOption grpc.DialOption, 
 
 func WithFilerClientFollowMetadata(filerClient filer_pb.FilerClient, option *MetadataFollowOption, processEventFn ProcessMetadataFunc) error {
 
-	err := filerClient.WithFilerClient(true, makeSubscribeMetadataFunc(option, processEventFn))
+	return WithFilerClientFollowMetadataContext(context.Background(), filerClient, option, processEventFn)
+}
+
+// WithFilerClientFollowMetadataContext follows metadata until the stream ends or
+// its owner cancels ctx. Existing callers retain their background lifetime.
+func WithFilerClientFollowMetadataContext(ctx context.Context, filerClient filer_pb.FilerClient, option *MetadataFollowOption, processEventFn ProcessMetadataFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	follow := makeSubscribeMetadataFuncContext(ctx, option, processEventFn)
+	var err error
+	if contextual, ok := filerClient.(interface {
+		WithFilerClientContext(context.Context, bool, func(filer_pb.SeaweedFilerClient) error) error
+	}); ok {
+		err = contextual.WithFilerClientContext(ctx, true, follow)
+	} else {
+		err = filerClient.WithFilerClient(true, follow)
+	}
 	if err != nil {
 		return fmt.Errorf("subscribing filer meta change: %w", err)
 	}
@@ -68,8 +85,15 @@ func WithFilerClientFollowMetadata(filerClient filer_pb.FilerClient, option *Met
 }
 
 func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn ProcessMetadataFunc) func(client filer_pb.SeaweedFilerClient) error {
+	return makeSubscribeMetadataFuncContext(context.Background(), option, processEventFn)
+}
+
+func makeSubscribeMetadataFuncContext(parent context.Context, option *MetadataFollowOption, processEventFn ProcessMetadataFunc) func(client filer_pb.SeaweedFilerClient) error {
 	return func(client filer_pb.SeaweedFilerClient) error {
-		ctx, cancel := context.WithCancel(context.Background())
+		if err := parent.Err(); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithCancel(parent)
 		defer cancel()
 		stream, err := client.SubscribeMetadata(ctx, &filer_pb.SubscribeMetadataRequest{
 			ClientName:                   option.ClientName,
@@ -89,14 +113,14 @@ func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn Proc
 			return fmt.Errorf("subscribe: %w", err)
 		}
 
-		handleErr := func(resp *filer_pb.SubscribeMetadataResponse, err error) {
+		handleErr := func(resp *filer_pb.SubscribeMetadataResponse, err error) error {
 			switch option.EventErrorType {
 			case TrivialOnError:
 				glog.Errorf("process %v: %v", resp, err)
 			case FatalOnError:
 				glog.Fatalf("process %v: %v", resp, err)
 			case RetryForeverOnError:
-				util.RetryUntil("followMetaUpdates", func() error {
+				return util.RetryUntilContext(ctx, "followMetaUpdates", func() error {
 					return processEventFn(resp)
 				}, func(err error) bool {
 					glog.Errorf("process %v: %v", resp, err)
@@ -107,6 +131,7 @@ func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn Proc
 			default:
 				glog.Errorf("process %v: %v", resp, err)
 			}
+			return nil
 		}
 
 		// handleOneEvent processes a single response, whether it arrived as the
@@ -115,7 +140,7 @@ func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn Proc
 		// MaxUnsyncedEvents marker (empty one). Both route to OnIdleHeartbeat,
 		// else the marker pins sync_offset to the stale processed watermark and a
 		// nil heartbeat folded into a batch nil-derefs in the sync job path.
-		handleOneEvent := func(resp *filer_pb.SubscribeMetadataResponse) {
+		handleOneEvent := func(resp *filer_pb.SubscribeMetadataResponse) error {
 			if resp.EventNotification == nil || filer_pb.IsEmpty(resp) {
 				if resp.TsNs > 0 && option.OnIdleHeartbeat != nil {
 					option.OnIdleHeartbeat(resp.TsNs)
@@ -125,12 +150,15 @@ func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn Proc
 				if resp.EventNotification != nil && resp.TsNs > 0 {
 					option.StartTsNs = resp.TsNs
 				}
-				return
+				return nil
 			}
 			if err := processEventFn(resp); err != nil {
-				handleErr(resp, err)
+				if err := handleErr(resp, err); err != nil {
+					return err
+				}
 			}
 			option.StartTsNs = resp.TsNs
+			return nil
 		}
 
 		var pendingRefs []*filer_pb.LogFileChunkRef
@@ -187,9 +215,13 @@ func makeSubscribeMetadataFunc(option *MetadataFollowOption, processEventFn Proc
 			// The server folds a backlog into one response: the first event lives in
 			// the top-level fields, the rest in resp.Events. Either slot can hold a
 			// freshness signal, so both go through the same handler.
-			handleOneEvent(resp)
+			if err := handleOneEvent(resp); err != nil {
+				return err
+			}
 			for _, batchedEvent := range resp.Events {
-				handleOneEvent(batchedEvent)
+				if err := handleOneEvent(batchedEvent); err != nil {
+					return err
+				}
 			}
 		}
 	}

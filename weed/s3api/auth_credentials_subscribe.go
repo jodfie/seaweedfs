@@ -14,7 +14,7 @@ import (
 
 const oidcProvidersDir = filer.IamConfigDirectory + "/oidc-providers"
 
-func (s3a *S3ApiServer) subscribeMetaEvents(clientName string, lastTsNs int64, prefix string, directoriesToWatch []string) {
+func (s3a *S3ApiServer) subscribeMetaEvents(ctx context.Context, clientName string, lastTsNs int64, prefix string, directoriesToWatch []string) {
 
 	processEventFn := func(resp *filer_pb.SubscribeMetadataResponse) error {
 
@@ -67,9 +67,9 @@ func (s3a *S3ApiServer) subscribeMetaEvents(clientName string, lastTsNs int64, p
 		StopTsNs:               0,
 		EventErrorType:         pb.FatalOnError,
 	}
-	util.RetryUntil("followIamChanges", func() error {
+	util.RetryUntilContext(ctx, "followIamChanges", func() error {
 		metadataFollowOption.ClientEpoch++
-		return pb.WithFilerClientFollowMetadata(s3a, metadataFollowOption, processEventFn)
+		return pb.WithFilerClientFollowMetadataContext(ctx, s3a, metadataFollowOption, processEventFn)
 	}, func(err error) bool {
 		glog.V(1).Infof("iam follow metadata changes: %v", err)
 		return true

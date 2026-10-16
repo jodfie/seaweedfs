@@ -23,11 +23,20 @@ func (s3a *S3ApiServer) WithFilerClient(streamingMode bool, fn func(filer_pb.Sea
 	return s3a.withFilerClient(context.Background(), streamingMode, fn)
 }
 
+// WithFilerClientContext lets owned metadata streams carry cancellation through
+// the failover walk as well as the RPC, without changing FilerClient callers.
+func (s3a *S3ApiServer) WithFilerClientContext(ctx context.Context, streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error {
+	return s3a.withFilerClient(ctx, streamingMode, fn)
+}
+
 // withFilerClient runs fn with ctx as the budget bounding the calls fn makes. It
 // cancels nothing itself -- fn owns its own RPC contexts -- but the walk needs to
 // know whose budget ran out: a caller's expiry is not evidence against the filer
 // that was answering it.
 func (s3a *S3ApiServer) withFilerClient(ctx context.Context, streamingMode bool, fn func(filer_pb.SeaweedFilerClient) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// Use filerClient for proper connection management and failover
 	if s3a.filerClient != nil {
 		return s3a.withFilerClientFailover(ctx, "", streamingMode, fn)
@@ -35,7 +44,7 @@ func (s3a *S3ApiServer) withFilerClient(ctx context.Context, streamingMode bool,
 
 	// Fallback to direct connection if filerClient not initialized
 	// This should only happen during initialization or testing
-	return pb.WithGrpcClient(context.Background(), streamingMode, s3a.randomClientId, func(grpcConnection *grpc.ClientConn) error {
+	return pb.WithGrpcClient(ctx, streamingMode, s3a.randomClientId, func(grpcConnection *grpc.ClientConn) error {
 		client := filer_pb.NewSeaweedFilerClient(grpcConnection)
 		return fn(client)
 	}, s3a.getFilerAddress().ToGrpcAddress(), false, s3a.option.GrpcDialOption)

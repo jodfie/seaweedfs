@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -387,6 +388,16 @@ func runServer(cmd *Command, args []string) bool {
 	}
 
 	serverWhiteList := util.StringSplit(*serverWhiteListOption, ",")
+
+	// Publish the dependency before either startup goroutine runs. A signal
+	// during startup must still join S3 before closing its filer dependency.
+	if *isStartingS3 && *isStartingFiler {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		s3Options.shutdownCtx = ctx
+		s3Options.shutdownDone = done
+		filerOptions.beforeShutdown = func() { cancel(); <-done }
+	}
 
 	if *isStartingFiler {
 		if *filerOptions.diskType == "" && *serverOptions.v.diskType != "" {

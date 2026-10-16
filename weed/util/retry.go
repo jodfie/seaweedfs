@@ -173,8 +173,17 @@ func RetryOnError(name string, shouldRetry func(error) bool, job func() error) (
 
 // RetryUntil retries until the job returns no error or onErrFn returns false
 func RetryUntil(name string, job func() error, onErrFn func(err error) (shouldContinue bool)) error {
+	return RetryUntilContext(context.Background(), name, job, onErrFn)
+}
+
+// RetryUntilContext also interrupts backoff and prevents another attempt after
+// owner cancellation. A blocking job must itself use ctx.
+func RetryUntilContext(ctx context.Context, name string, job func() error, onErrFn func(err error) (shouldContinue bool)) error {
 	waitTime := time.Second
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := job()
 		if err == nil {
 			waitTime = time.Second
@@ -184,7 +193,13 @@ func RetryUntil(name string, job func() error, onErrFn func(err error) (shouldCo
 			if strings.Contains(err.Error(), "transport") || strings.Contains(err.Error(), "ResourceExhausted") || strings.Contains(err.Error(), "Unavailable") {
 				glog.V(0).Infof("retry %s: err: %v", name, err)
 			}
-			time.Sleep(waitTime)
+			timer := time.NewTimer(waitTime)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 			if waitTime < RetryWaitTime {
 				waitTime += waitTime / 2
 			}
