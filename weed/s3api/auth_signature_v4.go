@@ -248,20 +248,20 @@ func (iam *IdentityAccessManagement) verifyV4Signature(r *http.Request, shouldCh
 		var found bool
 		identity, cred, found = iam.lookupByAccessKey(authInfo.AccessKey)
 		if !found {
-			// Log detailed error information for InvalidAccessKeyId (avoid slice allocation for performance)
+			// Report aggregate state without logging request-selected credential IDs.
 			iam.m.RLock()
 			keyCount := len(iam.accessKeyIdent)
 			iam.m.RUnlock()
 
-			glog.Warningf("InvalidAccessKeyId: attempted key '%s' not found. Available keys: %d, Auth enabled: %v",
-				authInfo.AccessKey, keyCount, iam.isAuthEnabled)
+			glog.Warningf("InvalidAccessKeyId: key not found. Available keys: %d, Auth enabled: %v",
+				keyCount, iam.isAuthEnabled)
 			return nil, nil, "", nil, s3err.ErrInvalidAccessKeyID
 		}
 
 		// Check service account expiration
 		if cred.isCredentialExpired() {
-			glog.V(2).Infof("Service account credential %s has expired (expiration: %d, now: %d)",
-				authInfo.AccessKey, cred.Expiration, time.Now().Unix())
+			glog.V(2).Infof("Service account credential has expired (expiration: %d, now: %d)",
+				cred.Expiration, time.Now().Unix())
 			return nil, nil, "", nil, s3err.ErrAccessDenied
 		}
 	}
@@ -791,21 +791,21 @@ func (iam *IdentityAccessManagement) doesPolicySignatureV4Match(formValues http.
 
 	identity, cred, found := iam.lookupByAccessKey(credHeader.accessKey)
 	if !found {
-		// Log detailed error information for InvalidAccessKeyId (POST policy)
+		// Report aggregate state without logging request-selected credential IDs.
 		iam.m.RLock()
 		availableKeyCount := len(iam.accessKeyIdent)
 		iam.m.RUnlock()
 
-		glog.Warningf("InvalidAccessKeyId (POST policy): attempted key '%s' not found. Available keys: %d, Auth enabled: %v",
-			credHeader.accessKey, availableKeyCount, iam.isAuthEnabled)
+		glog.Warningf("InvalidAccessKeyId (POST policy): key not found. Available keys: %d, Auth enabled: %v",
+			availableKeyCount, iam.isAuthEnabled)
 
 		return nil, s3err.ErrInvalidAccessKeyID
 	}
 
 	// Check service account expiration
 	if cred.isCredentialExpired() {
-		glog.V(2).Infof("Service account credential %s has expired (expiration: %d, now: %d)",
-			credHeader.accessKey, cred.Expiration, time.Now().Unix())
+		glog.V(2).Infof("Service account credential has expired (expiration: %d, now: %d)",
+			cred.Expiration, time.Now().Unix())
 		return nil, s3err.ErrAccessDenied
 	}
 

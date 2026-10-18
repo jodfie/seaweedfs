@@ -77,21 +77,21 @@ func (iam *IdentityAccessManagement) doesPolicySignatureV2Match(formValues http.
 
 	identity, cred, found := iam.lookupByAccessKey(accessKey)
 	if !found {
-		// Log detailed error information for InvalidAccessKeyId (V2 POST)
+		// Report aggregate state without logging request-selected credential IDs.
 		iam.m.RLock()
 		availableKeyCount := len(iam.accessKeyIdent)
 		iam.m.RUnlock()
 
-		glog.Warningf("InvalidAccessKeyId (V2 POST): attempted key '%s' not found. Available keys: %d, Auth enabled: %v",
-			accessKey, availableKeyCount, iam.isAuthEnabled)
+		glog.Warningf("InvalidAccessKeyId (V2 POST): key not found. Available keys: %d, Auth enabled: %v",
+			availableKeyCount, iam.isAuthEnabled)
 
 		return nil, s3err.ErrInvalidAccessKeyID
 	}
 
 	// Check service account expiration
 	if cred.isCredentialExpired() {
-		glog.V(2).Infof("Service account credential %s has expired (expiration: %d, now: %d)",
-			accessKey, cred.Expiration, time.Now().Unix())
+		glog.V(2).Infof("Service account credential has expired (expiration: %d, now: %d)",
+			cred.Expiration, time.Now().Unix())
 		return nil, s3err.ErrAccessDenied
 	}
 
@@ -129,21 +129,21 @@ func (iam *IdentityAccessManagement) doesSignV2Match(r *http.Request) (*Identity
 
 	identity, cred, found := iam.lookupByAccessKey(accessKey)
 	if !found {
-		// Log detailed error information for InvalidAccessKeyId (V2 signed)
+		// Report aggregate state without logging request-selected credential IDs.
 		iam.m.RLock()
 		availableKeyCount := len(iam.accessKeyIdent)
 		iam.m.RUnlock()
 
-		glog.Warningf("InvalidAccessKeyId (V2 signed): attempted key '%s' not found. Available keys: %d, Auth enabled: %v",
-			accessKey, availableKeyCount, iam.isAuthEnabled)
+		glog.Warningf("InvalidAccessKeyId (V2 signed): key not found. Available keys: %d, Auth enabled: %v",
+			availableKeyCount, iam.isAuthEnabled)
 
 		return nil, s3err.ErrInvalidAccessKeyID
 	}
 
 	// Check service account expiration
 	if cred.isCredentialExpired() {
-		glog.V(2).Infof("Service account credential %s has expired (expiration: %d, now: %d)",
-			accessKey, cred.Expiration, time.Now().Unix())
+		glog.V(2).Infof("Service account credential has expired (expiration: %d, now: %d)",
+			cred.Expiration, time.Now().Unix())
 		return nil, s3err.ErrAccessDenied
 	}
 
@@ -206,21 +206,21 @@ func (iam *IdentityAccessManagement) doesPresignV2SignatureMatch(r *http.Request
 
 	identity, cred, found := iam.lookupByAccessKey(accessKey)
 	if !found {
-		// Log detailed error information for InvalidAccessKeyId (V2 presigned)
+		// Report aggregate state without logging request-selected credential IDs.
 		iam.m.RLock()
 		availableKeyCount := len(iam.accessKeyIdent)
 		iam.m.RUnlock()
 
-		glog.Warningf("InvalidAccessKeyId (V2 presigned): attempted key '%s' not found. Available keys: %d, Auth enabled: %v",
-			accessKey, availableKeyCount, iam.isAuthEnabled)
+		glog.Warningf("InvalidAccessKeyId (V2 presigned): key not found. Available keys: %d, Auth enabled: %v",
+			availableKeyCount, iam.isAuthEnabled)
 
 		return nil, s3err.ErrInvalidAccessKeyID
 	}
 
 	// Check service account expiration
 	if cred.isCredentialExpired() {
-		glog.V(2).Infof("Service account credential %s has expired (expiration: %d, now: %d)",
-			accessKey, cred.Expiration, time.Now().Unix())
+		glog.V(2).Infof("Service account credential has expired (expiration: %d, now: %d)",
+			cred.Expiration, time.Now().Unix())
 		return nil, s3err.ErrAccessDenied
 	}
 
